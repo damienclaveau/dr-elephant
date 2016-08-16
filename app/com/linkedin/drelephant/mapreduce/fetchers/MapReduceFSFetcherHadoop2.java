@@ -80,10 +80,17 @@ public class MapReduceFSFetcherHadoop2 extends MapReduceFetcher {
 
     Configuration conf = new Configuration();
     this._fs = FileSystem.get(conf);
-    this._historyLocation = conf.get("mapreduce.jobhistory.done-dir");
-    this._intermediateHistoryLocation = conf.get("mapreduce.jobhistory.intermediate-done-dir");
-    logger.info("Intermediate history dir: " + _intermediateHistoryLocation);
-    logger.info("History done dir: " + _historyLocation);
+	String amHistoryLocation = conf.get("yarn.app.mapreduce.am.staging-dir");
+    if (amHistoryLocation != null && !amHistoryLocation.isEmpty()) {
+      this._historyLocation = amHistoryLocation + "/history/done";
+      this._intermediateHistoryLocation = amHistoryLocation + "/history/done_intermediate";
+    }
+    else {
+      this._historyLocation = conf.get("mapreduce.jobhistory.done-dir");
+      this._intermediateHistoryLocation = conf.get("mapreduce.jobhistory.intermediate-done-dir");
+    }
+    logger.info("Intermediate history dir: " + this._intermediateHistoryLocation);
+    logger.info("History done dir: " + this._historyLocation);
   }
 
   public String getHistoryLocation() {
