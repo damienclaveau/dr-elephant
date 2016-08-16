@@ -31,8 +31,7 @@ import com.linkedin.drelephant.analysis.{ApplicationType, AnalyticJob, ElephantF
 import org.apache.commons.io.FileUtils
 
 import org.apache.hadoop.conf.Configuration
-import org.apache.hadoop.fs.{Path, FileSystem}
-import org.apache.hadoop.hdfs.web.WebHdfsFileSystem
+import org.apache.hadoop.fs.{Path, FileSystem, FileStatus}
 import org.apache.hadoop.security.authentication.client.{AuthenticatedURL, AuthenticationException}
 import org.apache.log4j.Logger
 import org.apache.spark.SparkConf
@@ -58,7 +57,9 @@ class SparkFSFetcher(fetcherConfData: FetcherConfigurationData) extends Elephant
 
   val NAME_SERVICES = "dfs.nameservices";
   val DFS_HA_NAMENODES = "dfs.ha.namenodes";
+  val DFS_HTTP_POLICY = "dfs.http.policy";
   val DFS_NAMENODE_HTTP_ADDRESS = "dfs.namenode.http-address";
+  val DFS_NAMENODE_HTTPS_ADDRESS = "dfs.namenode.https-address";
 
   var confEventLogSizeInMb = defEventLogSizeInMb
   if (fetcherConfData.getParamMap.get(LOG_SIZE_XML_FIELD) != null) {
@@ -82,8 +83,11 @@ class SparkFSFetcher(fetcherConfData: FetcherConfigurationData) extends Elephant
    */
   private lazy val _logDir: String = {
     val conf = new Configuration()
+    // check if SSL is enabled
+    val hdfsHttpPolicy : String = conf.get(DFS_HTTP_POLICY)
+    val webhdfsPrefix = if (hdfsHttpPolicy.equals("HTTPS_ONLY")) "swebhdfs://" else "webhdfs://"
     val nodeAddress = getNamenodeAddress(conf);
-    val hdfsAddress = if (nodeAddress == null) "" else "webhdfs://" + nodeAddress
+    val hdfsAddress = if (nodeAddress == null) "" else webhdfsPrefix + nodeAddress
 
     val uri = new URI(_sparkConf.get("spark.eventLog.dir", confEventLogDir))
     val logDir = hdfsAddress + uri.getPath
@@ -104,7 +108,7 @@ class SparkFSFetcher(fetcherConfData: FetcherConfigurationData) extends Elephant
     if (fetcherConfData.getParamMap.get(NAMENODE_ADDRESSES) != null) {
       val nameNodes: Array[String] = fetcherConfData.getParamMap.get(NAMENODE_ADDRESSES).split(",");
       for (nameNode <- nameNodes) {
-        if (checkActivation(nameNode)) {
+        if (checkActivation("http://" + nameNode)) {
           return nameNode;
         }
       }
@@ -115,6 +119,9 @@ class SparkFSFetcher(fetcherConfData: FetcherConfigurationData) extends Elephant
     if (conf.get(NAME_SERVICES) != null) {
       isHAEnabled = true;
     }
+
+    // check if SSL is enabled
+    val hdfsHttpPolicy : String = conf.get(DFS_HTTP_POLICY)
 
     // check if HA is enabled
     if (isHAEnabled) {
@@ -128,17 +135,29 @@ class SparkFSFetcher(fetcherConfData: FetcherConfigurationData) extends Elephant
       if (nameNodeIdentifier != null) {
         // there can be multiple namenode identifiers separated by ','
         for (nameNodeIdentifierValue <- nameNodeIdentifier.split(",")) {
-          val httpValue = conf.get(DFS_NAMENODE_HTTP_ADDRESS + "." + nameService + "." + nameNodeIdentifierValue);
-          if (httpValue != null && checkActivation(httpValue)) {
-            logger.info("Active namenode : " + httpValue);
-            return httpValue;
+          var namenodeAddress : String = null;
+          var checkAddress : String = null;
+          if (hdfsHttpPolicy.equals("HTTPS_ONLY")) {
+            namenodeAddress = conf.get(DFS_NAMENODE_HTTPS_ADDRESS + "." + nameService + "." + nameNodeIdentifierValue);
+            checkAddress = "https://" + namenodeAddress;
+          } else {
+            namenodeAddress = conf.get(DFS_NAMENODE_HTTP_ADDRESS + "." + nameService + "." + nameNodeIdentifierValue);
+            checkAddress = "http://" + namenodeAddress;
+          }
+          if (namenodeAddress != null && checkActivation(checkAddress)) {
+            logger.info("Active namenode : " + namenodeAddress);
+            return namenodeAddress;
           }
         }
       }
     }
 
     // if HA is disabled, return the namenode http-address.
-    return conf.get(DFS_NAMENODE_HTTP_ADDRESS);
+    if (hdfsHttpPolicy.equals("HTTPS_ONLY")) {
+      return conf.get(DFS_NAMENODE_HTTPS_ADDRESS);
+    } else {
+      return conf.get(DFS_NAMENODE_HTTP_ADDRESS);
+    }
   }
 
   /**
@@ -147,7 +166,7 @@ class SparkFSFetcher(fetcherConfData: FetcherConfigurationData) extends Elephant
    * @return True if the namenode is active, otherwise false
    */
   def checkActivation(httpValue: String): Boolean = {
-    val url: URL = new URL("http://" + httpValue + "/jmx?qry=Hadoop:service=NameNode,name=NameNodeStatus");
+    val url: URL = new URL(httpValue + "/jmx?qry=Hadoop:service=NameNode,name=NameNodeStatus");
     val rootNode: JsonNode = readJsonNode(url);
     val status: String = rootNode.path("beans").get(0).path("State").getValueAsText();
     if (status.equals("active")) {
@@ -178,8 +197,11 @@ class SparkFSFetcher(fetcherConfData: FetcherConfigurationData) extends Elephant
     if (new URI(_logDir).getHost == null) {
       FileSystem.getLocal(new Configuration())
     } else {
-      val filesystem = new WebHdfsFileSystem()
-      filesystem.initialize(new URI(_logDir), new Configuration())
+      var filesystem: FileSystem = null;
+      val conf = new Configuration();
+      // generic way to obtain a FileSystem instance for any protocol (hdfs://, webhdfs://, swebhdfs://) 
+      conf.set("fs.defaultFS",_logDir);
+      filesystem = FileSystem.get(conf);
       filesystem
     }
   }
